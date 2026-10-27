@@ -40,4 +40,4 @@ This server preserves the original Planning Center Services tools, but removes P
 - This is a self-hosted PAT broker. The operator is responsible for securely handling users' Planning Center credentials, database backups, abuse prevention and incident response.
 - The hosted form verifies the PAT with a read call to the Services API. A PAT with no access to Services will be rejected.
 - This implementation is a starting point for controlled deployment. Before broad public distribution, add registration/login rate limits, auditing without sensitive values, database lifecycle cleanup, and a security review.
-- Compatibility with each specific MCP client must be verified in a deployed environment; it has not been end-to-end tested against Claude.ai.
+- Compatibility with each specific MCP client must be verified in a deployed environment; it has not been end-to-end tested against a ferramenta de IA utilizada.

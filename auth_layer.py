@@ -10,6 +10,7 @@ import json
 import os
 import secrets
 import re
+import logging
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode, urlsplit
 
@@ -20,6 +21,7 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 current_pat = contextvars.ContextVar('pco_pat', default=None)
+logger = logging.getLogger('pco.oauth')
 
 
 def env(name):
@@ -249,46 +251,56 @@ def make_token():
 
 
 async def token(request):
+    """Exchange a code or rotate a refresh token atomically in Postgres.
+
+    A failed insert must not consume the prior refresh token. OAuth secrets and
+    authorization codes must never be written to application logs.
+    """
     form = await request.form()
-    grant = form.get('grant_type')
+    grant = str(form.get('grant_type', ''))
     client_id = str(form.get('client_id', ''))
+    access, refresh = make_token(), make_token()
     conn = await db()
     try:
-        if grant == 'authorization_code':
-            verifier = str(form.get('code_verifier', ''))
-            if not re.fullmatch(r'[A-Za-z0-9._~-]{43,128}', verifier):
-                return error('invalid_grant')
-            challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b'=').decode()
-            async with conn.transaction():
-                record = await conn.fetchrow('DELETE FROM oauth_codes WHERE code_hash=$1 AND client_id=$2 AND redirect_uri=$3 AND challenge=$4 AND expires_at>NOW() RETURNING pat_ciphertext',
-                                             digest(str(form.get('code', ''))), client_id, str(form.get('redirect_uri', '')), challenge)
-            if not record:
-                return error('invalid_grant')
-            encrypted = record['pat_ciphertext']
-        elif grant == 'refresh_token':
-            async with conn.transaction():
-                record = await conn.fetchrow("DELETE FROM oauth_tokens WHERE token_hash=$1 AND client_id=$2 AND token_type='refresh' AND expires_at>NOW() RETURNING pat_ciphertext",
-                                             digest(str(form.get('refresh_token', ''))), client_id)
-            if not record:
-                return error('invalid_grant')
-            encrypted = record['pat_ciphertext']
-        else:
+        if grant not in ('authorization_code', 'refresh_token'):
             return error('unsupported_grant_type')
-        access, refresh = make_token(), make_token()
-        await conn.executemany('INSERT INTO oauth_tokens(token_hash,client_id,pat_ciphertext,token_type,expires_at) VALUES($1,$2,$3,$4,$5)', [
-            (digest(access), client_id, encrypted, 'access', utcnow() + timedelta(hours=1)),
-            (digest(refresh), client_id, encrypted, 'refresh', utcnow() + timedelta(days=30)),
-        ])
+        async with conn.transaction():
+            if grant == 'authorization_code':
+                verifier = str(form.get('code_verifier', ''))
+                if not re.fullmatch(r'[A-Za-z0-9._~-]{43,128}', verifier):
+                    logger.info('oauth_exchange_rejected reason=invalid_pkce')
+                    return error('invalid_grant')
+                challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b'=').decode()
+                record = await conn.fetchrow(
+                    'DELETE FROM oauth_codes WHERE code_hash=$1 AND client_id=$2 AND redirect_uri=$3 AND challenge=$4 AND expires_at>NOW() RETURNING pat_ciphertext',
+                    digest(str(form.get('code', ''))), client_id, str(form.get('redirect_uri', '')), challenge)
+            else:
+                record = await conn.fetchrow(
+                    "DELETE FROM oauth_tokens WHERE token_hash=$1 AND client_id=$2 AND token_type='refresh' AND expires_at>NOW() RETURNING pat_ciphertext",
+                    digest(str(form.get('refresh_token', ''))), client_id)
+            if not record:
+                logger.info('oauth_exchange_rejected grant=%s reason=invalid_or_expired', grant)
+                return error('invalid_grant')
+            encrypted = record['pat_ciphertext']
+            await conn.executemany('INSERT INTO oauth_tokens(token_hash,client_id,pat_ciphertext,token_type,expires_at) VALUES($1,$2,$3,$4,$5)', [
+                (digest(access), client_id, encrypted, 'access', utcnow() + timedelta(hours=1)),
+                (digest(refresh), client_id, encrypted, 'refresh', utcnow() + timedelta(days=30)),
+            ])
+        logger.info('oauth_exchange_success grant=%s', grant)
         return JSONResponse({'access_token': access, 'refresh_token': refresh, 'token_type': 'Bearer', 'expires_in': 3600, 'scope': 'pco'}, headers={'Cache-Control': 'no-store', 'Pragma': 'no-cache'})
     finally:
         await conn.close()
 
 
 async def revoke(request):
+    """RFC 7009-style revocation; unknown tokens intentionally also return 200."""
     form = await request.form()
     conn = await db()
     try:
-        await conn.execute('DELETE FROM oauth_tokens WHERE token_hash=$1 AND client_id=$2', digest(str(form.get('token', ''))), str(form.get('client_id', '')))
+        result = await conn.execute(
+            'DELETE FROM oauth_tokens WHERE token_hash=$1 AND client_id=$2',
+            digest(str(form.get('token', ''))), str(form.get('client_id', '')))
+        logger.info('oauth_revoke matched=%s', result == 'DELETE 1')
     finally:
         await conn.close()
     return JSONResponse({}, headers={'Cache-Control': 'no-store'})
@@ -313,6 +325,7 @@ class ProtectedMCP:
             finally:
                 await conn.close()
         if not record:
+            logger.info('mcp_request_denied reason=missing_invalid_or_expired_access_token')
             response = JSONResponse({'error': 'unauthorized'}, status_code=401, headers={
                 'WWW-Authenticate': f'Bearer resource_metadata="{issuer()}/.well-known/oauth-protected-resource"',
                 'Cache-Control': 'no-store',
@@ -321,6 +334,9 @@ class ProtectedMCP:
         try:
             pat = json.loads(cipher().decrypt(record['pat_ciphertext']).decode())
         except (InvalidToken, ValueError):
+            return await error('invalid_credentials', 401)(scope, receive, send)
+        # Fail closed if a stored credential has an unexpected shape.
+        if not isinstance(pat, list) or len(pat) != 2 or not all(isinstance(x, str) and x for x in pat):
             return await error('invalid_credentials', 401)(scope, receive, send)
         marker = current_pat.set(tuple(pat))
         try:

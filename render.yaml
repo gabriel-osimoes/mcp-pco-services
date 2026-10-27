@@ -15,3 +15,7 @@ services:
         sync: false
       - key: TOKEN_ENCRYPTION_KEY
         sync: false
+      # Optional: Enable only after confirming the PAT belongs to the correct user
+      # during real tool calls on oauth_test. Default is deliberately false.
+      - key: MCP_STATELESS_HTTP
+        value: "false"

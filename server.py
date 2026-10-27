@@ -35,6 +35,7 @@ hostname = urlsplit(public_url).hostname or 'localhost'
 mcp = FastMCP(
     "Planning Center Services",
     instructions="Use the authenticated user's Planning Center Services permissions. Never request a PAT in tool arguments.",
+    stateless_http=os.environ.get("MCP_STATELESS_HTTP", "false").lower() in ("true", "1", "yes"),
     transport_security=TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
         allowed_hosts=[hostname, hostname + ':*', 'localhost:*', '127.0.0.1:*'],
@@ -828,10 +829,12 @@ if __name__ == "__main__":
 
     port = int(os.environ.get("PORT", 10000))
 
+    # /mcp is served by FastMCP. MCP_STATELESS_HTTP can be enabled in an isolated test.
+    # It is OFF by default until OAuth-to-tool credential propagation is integration-tested.
     # streamable_http_app() already exposes the MCP endpoint at /mcp
     # and also includes any @mcp.custom_route (e.g. /health)
     import asyncio
     asyncio.run(initialize())
     app = ProtectedMCP(mcp.streamable_http_app())
 
-    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info", access_log=False)
