@@ -9,6 +9,7 @@ import html
 import json
 import os
 import secrets
+import re
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode, urlsplit
 
@@ -77,7 +78,7 @@ def allowed_redirect(uri):
     try:
         p = urlsplit(uri)
         return (p.scheme == 'https' and bool(p.netloc) and not p.username and not p.password and not p.fragment) or (
-            p.scheme == 'http' and p.hostname in ('localhost', '127.0.0.1', '::1') and not p.username and not p.password
+            p.scheme == 'http' and p.hostname in ('localhost', '127.0.0.1', '::1') and not p.username and not p.password and not p.fragment
         )
     except ValueError:
         return False
@@ -127,7 +128,7 @@ async def valid_authorization(params):
     client_id = params.get('client_id', '')
     redirect_uri = params.get('redirect_uri', '')
     challenge = params.get('code_challenge', '')
-    if params.get('response_type') != 'code' or params.get('code_challenge_method') != 'S256' or len(challenge) < 43 or len(challenge) > 128:
+    if params.get('response_type') != 'code' or params.get('code_challenge_method') != 'S256' or not re.fullmatch(r'[A-Za-z0-9_-]{43,128}', challenge):
         return False
     conn = await db()
     try:
@@ -209,7 +210,7 @@ async def token(request):
     try:
         if grant == 'authorization_code':
             verifier = str(form.get('code_verifier', ''))
-            if not 43 <= len(verifier) <= 128:
+            if not re.fullmatch(r'[A-Za-z0-9._~-]{43,128}', verifier):
                 return error('invalid_grant')
             challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b'=').decode()
             async with conn.transaction():
@@ -253,11 +254,11 @@ class ProtectedMCP:
         self.app = app
 
     async def __call__(self, scope, receive, send):
-        if scope['type'] != 'http' or not scope.get('path', '').startswith('/mcp'):
+        if scope['type'] != 'http' or not (scope.get('path', '') == '/mcp' or scope.get('path', '').startswith('/mcp/')):
             return await self.app(scope, receive, send)
         headers = dict(scope.get('headers', []))
         authorization = headers.get(b'authorization', b'').decode('latin1')
-        value = authorization[7:] if authorization.startswith('Bearer ') else ''
+        value = authorization[7:] if authorization.lower().startswith('bearer ') else ''
         record = None
         if value:
             conn = await db()
