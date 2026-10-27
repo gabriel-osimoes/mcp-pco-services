@@ -145,7 +145,7 @@ label{display:block;margin-top:18px;font-weight:600}input{box-sizing:border-box;
 button{background:#1764ce;color:white;border:0;padding:13px;width:100%;border-radius:7px;margin-top:24px;cursor:pointer}
 p{line-height:1.5;color:#49556a;font-size:14px}</style></head><body><main><h2>Conectar Planning Center</h2>
 <p>Insira seu Application ID e Secret do Personal Access Token. Eles serão validados no Planning Center e armazenados criptografados no servidor desta integração, não no cliente de IA.</p>
-<form method="post" action="/authorize"><input type="hidden" name="ticket" value="{ticket}">
+<form method="post" action="{form_action}"><input type="hidden" name="ticket" value="{ticket}">
 <label>Application ID<input name="app_id" required autocomplete="off"></label>
 <label>Secret<input name="secret" type="password" required autocomplete="off"></label>
 <button type="submit">Conectar com segurança</button></form><p>Use somente um servidor que você reconhece e confia.</p></main></body></html>'''
@@ -159,7 +159,21 @@ async def authorize_get(request):
     if not await valid_authorization(params):
         return error('invalid_authorization_request')
     ticket = cipher().encrypt(json.dumps({'params': params, 'expires': (utcnow() + timedelta(minutes=10)).timestamp()}).encode()).decode()
-    return HTMLResponse(FORM.replace("{ticket}", html.escape(ticket, quote=True)), headers={'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer', 'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"})
+    # Use the configured canonical HTTPS origin for both the form target and CSP.
+    # This prevents browser-side form blocking if a proxy serves the OAuth page
+    # under a different origin than the PUBLIC_URL origin.
+    action = issuer() + '/authorize'
+    page = (FORM.replace('{ticket}', html.escape(ticket, quote=True))
+                .replace('{form_action}', html.escape(action, quote=True)))
+    return HTMLResponse(page, headers={
+        'Cache-Control': 'no-store',
+        'Referrer-Policy': 'no-referrer',
+        'Content-Security-Policy': (
+            "default-src 'none'; style-src 'unsafe-inline'; "
+            f"form-action 'self' {issuer()}; "
+            "base-uri 'none'; frame-ancestors 'none'"
+        ),
+    })
 
 
 async def authorize_post(request):
