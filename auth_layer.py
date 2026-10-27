@@ -159,7 +159,7 @@ async def authorize_get(request):
     if not await valid_authorization(params):
         return error('invalid_authorization_request')
     ticket = cipher().encrypt(json.dumps({'params': params, 'expires': (utcnow() + timedelta(minutes=10)).timestamp()}).encode()).decode()
-    return HTMLResponse(FORM.format(ticket=html.escape(ticket, quote=True)), headers={'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer', 'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"})
+    return HTMLResponse(FORM.replace("{ticket}", html.escape(ticket, quote=True)), headers={'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer', 'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"})
 
 
 async def authorize_post(request):
