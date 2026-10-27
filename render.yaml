@@ -5,12 +5,13 @@ services:
     plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: python server.py
+    healthCheckPath: /health
     envVars:
       - key: PORT
         value: 10000
-      # Optional: protect the MCP endpoint itself with a bearer token.
-      # Clients must then send Authorization: Bearer <this value>
-      # Leave empty if you want the endpoint open (credentials still required per-tool).
-      - key: MCP_API_TOKEN
-        generateValue: true
-    healthCheckPath: /health
+      - key: PUBLIC_URL
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: TOKEN_ENCRYPTION_KEY
+        sync: false

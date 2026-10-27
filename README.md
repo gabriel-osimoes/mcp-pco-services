@@ -1,135 +1,43 @@
-# Planning Center Services MCP Server
+# Planning Center Services MCP — PAT connection flow
 
-MCP (Model Context Protocol) server that gives AI assistants **full CRUD access** to the **Planning Center Services** API.
+This server preserves the original Planning Center Services tools, but removes PAT fields from all MCP tool schemas. Each user connects through an **OAuth-style authorization code + PKCE** flow, using a hosted form to submit their own Planning Center **Application ID and Secret**. This is **not** official Planning Center OAuth: the service stores the user's PAT (encrypted) and issues its own access and refresh tokens.
 
-- Hosted on **Render.com** (Streamable HTTP)
-- Users supply their own **Personal Access Token** (client_id + secret) on every tool call
-- Covers every resource via a generic request tool + convenient typed tools for the most common ones
+## Deployment
 
-## Features
+1. Provision a persistent PostgreSQL database (Render Postgres or another managed provider). A free Render web instance does **not** provide persistent local storage. Ensure the database is reachable from the web service.
+2. Generate an encryption key locally: `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`.
+3. Configure Render environment variables:
+   - `PUBLIC_URL` — exact HTTPS public origin, e.g. `https://pco-services-mcp.onrender.com` (no `/mcp`).
+   - `DATABASE_URL` — PostgreSQL connection string, including SSL settings required by your provider.
+   - `TOKEN_ENCRYPTION_KEY` — generated Fernet key. **Never change this without a data migration**: existing saved PATs become unreadable.
+   - `PORT` — optional; Render usually supplies it.
+4. Deploy with `python server.py`. Database tables are created automatically on startup.
+5. Add `https://YOUR-HOST.onrender.com/mcp` as a custom remote MCP in a client supporting OAuth discovery, dynamic client registration and PKCE. The client should open the hosted PAT form.
 
-| Resource | List | Get | Create | Update | Delete |
-|----------|------|-----|--------|--------|--------|
-| Service Types | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Plans | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Items (order of service) | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Songs | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Arrangements | ✅ | – | ✅ | via generic | via generic |
-| Keys | ✅ | – | ✅ | via generic | via generic |
-| Teams | ✅ | – | ✅ | via generic | via generic |
-| **Any other endpoint** | via `pco_services_request` | | | | |
+## Security properties
 
-## Quick Deploy to Render
+- `/mcp` requires a valid Bearer token; unauthenticated requests return 401 and a protected-resource metadata pointer.
+- Each OAuth client registers its callback URI. Authorization requires S256 PKCE, and authorization codes expire after 5 minutes and are single-use.
+- Access tokens expire after 1 hour; refresh tokens after 30 days and are rotated on use.
+- Only SHA-256 hashes of issued tokens are stored; PAT pairs are encrypted with Fernet at rest in PostgreSQL.
+- Tool schemas never expose Application ID or Secret. Each request resolves the appropriate PAT from its authenticated session.
+- `/revoke` supports token revocation. To disconnect completely, also revoke the original PAT in Planning Center.
+- Do not expose `DATABASE_URL`, `TOKEN_ENCRYPTION_KEY`, tokens or PATs in logs or commits.
 
-1. Fork / push this repo to GitHub.
-2. In Render: **New → Web Service → Connect the repo**.
-3. Render will detect `render.yaml` and deploy.
-4. Your MCP endpoint will be:
+## Routes
 
-   ```
-   https://<your-service-name>.onrender.com/mcp
-   ```
+- `/.well-known/oauth-authorization-server` — authorization-server discovery
+- `/.well-known/oauth-protected-resource` — resource discovery
+- `/register` — dynamic OAuth client registration
+- `/authorize` — consent/PAT form
+- `/token` — authorization code or refresh token exchange
+- `/revoke` — revoke a token
+- `/mcp` — protected Streamable HTTP MCP endpoint
+- `/health` — health check
 
-5. (Optional) Copy the auto-generated `MCP_API_TOKEN` from the Environment tab if you want to protect the endpoint.
+## Important notes
 
-## Connecting an AI client
-
-### Cursor
-
-Add to `.cursor/mcp.json` (or global settings):
-
-```json
-{
-  "mcpServers": {
-    "pco-services": {
-      "url": "https://YOUR-SERVICE.onrender.com/mcp",
-      "headers": {
-        "Authorization": "Bearer YOUR_MCP_API_TOKEN"
-      }
-    }
-  }
-}
-```
-
-### Claude Desktop / other clients that support remote MCP
-
-Use the same URL + optional Bearer token.
-
-## Authentication (Planning Center)
-
-Every tool requires two parameters:
-
-| Parameter   | Description |
-|-------------|-------------|
-| `client_id` | Application ID of your Personal Access Token |
-| `secret`    | Secret of the Personal Access Token |
-
-Create a PAT here:  
-https://api.planningcenteronline.com/personal_access_tokens
-
-> **Tip:** If you already have an OAuth access_token you can pass it as `client_id` and leave `secret` empty (the server will use Bearer auth).
-
-## Example tool calls
-
-**List future plans of a service type**
-
-```
-list_plans(
-  client_id="abc123",
-  secret="def456",
-  service_type_id="987",
-  filter="future",
-  include="items,plan_people"
-)
-```
-
-**Create a song and then an arrangement**
-
-```
-create_song(client_id=..., secret=..., title="Amazing Grace", author="John Newton")
-create_arrangement(client_id=..., secret=..., song_id="123", name="Standard", bpm=72)
-```
-
-**Anything else (generic)**
-
-```
-pco_services_request(
-  client_id=...,
-  secret=...,
-  method="GET",
-  path="/service_types/1/plans/2/team_members",
-  include="person,team",
-  filter="confirmed"
-)
-```
-
-## Local development
-
-```bash
-python -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-
-export PORT=10000
-python server.py
-```
-
-Then open the MCP Inspector:
-
-```bash
-npx -y @modelcontextprotocol/inspector
-```
-
-Connect to `http://localhost:10000/mcp` using **Streamable HTTP**.
-
-## API Reference
-
-Official docs: https://developer.planning.center/docs/#/apps/services  
-OpenAPI: https://api.planningcenteronline.com/services/v2/open_api/2018-11-01
-
-## Security notes
-
-- The server itself stores **no credentials**.
-- Every call to Planning Center is made with the credentials the AI user supplies.
-- Protect the public `/mcp` endpoint with `MCP_API_TOKEN` (already generated by the Render blueprint) so only authorized clients can reach the tools.
-- Never commit real PAT secrets to git.
+- This is a self-hosted PAT broker. The operator is responsible for securely handling users' Planning Center credentials, database backups, abuse prevention and incident response.
+- The hosted form verifies the PAT with a read call to the Services API. A PAT with no access to Services will be rejected.
+- This implementation is a starting point for controlled deployment. Before broad public distribution, add registration/login rate limits, auditing without sensitive values, database lifecycle cleanup, and a security review.
+- Compatibility with each specific MCP client must be verified in a deployed environment; it has not been end-to-end tested against Claude.ai.
