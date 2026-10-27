@@ -213,7 +213,35 @@ async def authorize_post(request):
     query = {'code': code}
     if 'state' in params:
         query['state'] = params['state']
-    return RedirectResponse(params['redirect_uri'] + ('&' if '?' in params['redirect_uri'] else '?') + urlencode(query), status_code=303, headers={'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer'})
+    # Display confirmation only after the PAT has been validated and the OAuth
+    # authorization code has been stored. The client MUST still receive the code
+    # through its registered redirect URI for OAuth to complete.
+    callback_url = params['redirect_uri'] + ('&' if '?' in params['redirect_uri'] else '?') + urlencode(query)
+    script_nonce = secrets.token_urlsafe(18)
+    # Prevent user-controlled URLs from terminating the embedded script element.
+    callback_js = json.dumps(callback_url).replace('<', '\\u003c').replace('>', '\\u003e')
+    page = f'''<!doctype html><html lang="pt-BR"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer"><title>Planning Center autorizado</title>
+<style>body{{font-family:system-ui;background:#f6f7fb;color:#172033;margin:0;padding:36px 16px}}
+main{{max-width:440px;margin:36px auto;background:white;padding:30px;border-radius:14px;box-shadow:0 5px 25px #0001;text-align:center}}
+h1{{font-size:23px}}p{{line-height:1.55;color:#49556a}}a{{display:block;background:#1764ce;color:white;text-decoration:none;padding:13px;border-radius:7px;margin-top:24px}}</style>
+</head><body><main role="status"><h1>✓ PAT validado com sucesso</h1>
+<p>O Planning Center autorizou suas credenciais. Estamos retornando à sua ferramenta de IA para concluir a conexão.</p>
+<p>Se o redirecionamento não ocorrer automaticamente, clique no botão abaixo.</p>
+<a rel="noreferrer" href="{html.escape(callback_url, quote=True)}">Continuar à sua ferramenta de IA</a>
+<p style="font-size:13px">Feche esta aba somente depois que sua ferramenta de IA confirmar a conexão.</p>
+</main><script nonce="{script_nonce}">
+window.setTimeout(function() {{ window.location.replace({callback_js}); }}, 1700);
+</script></body></html>'''
+    return HTMLResponse(page, headers={
+        'Cache-Control': 'no-store, max-age=0',
+        'Referrer-Policy': 'no-referrer',
+        'Content-Security-Policy': (
+            "default-src 'none'; style-src 'unsafe-inline'; "
+            f"script-src 'nonce-{script_nonce}'; base-uri 'none'; frame-ancestors 'none'"
+        ),
+    })
 
 
 def make_token():
