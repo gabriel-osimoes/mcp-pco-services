@@ -163,6 +163,10 @@ async def authorize_get(request):
     # This prevents browser-side form blocking if a proxy serves the OAuth page
     # under a different origin than the PUBLIC_URL origin.
     action = issuer() + '/authorize'
+    # Authorization has already verified this redirect URI against the client's registration.
+    # Chromium applies form-action to redirects following a form submission as well.
+    callback = urlsplit(params['redirect_uri'])
+    callback_origin = f'{callback.scheme}://{callback.netloc}'
     page = (FORM.replace('{ticket}', html.escape(ticket, quote=True))
                 .replace('{form_action}', html.escape(action, quote=True)))
     return HTMLResponse(page, headers={
@@ -170,7 +174,7 @@ async def authorize_get(request):
         'Referrer-Policy': 'no-referrer',
         'Content-Security-Policy': (
             "default-src 'none'; style-src 'unsafe-inline'; "
-            f"form-action 'self' {issuer()}; "
+            f"form-action 'self' {issuer()} {callback_origin}; "
             "base-uri 'none'; frame-ancestors 'none'"
         ),
     })
