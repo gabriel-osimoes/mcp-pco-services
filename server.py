@@ -3,8 +3,7 @@ Planning Center Services MCP Server
 ===================================
 MCP server that exposes full CRUD access to the Planning Center Services API.
 
-Hosted on Render.com (Streamable HTTP). Users pass their own Personal Access Token
-(client_id + secret) as tool parameters — credentials never live on the server.
+Hosted on Render.com (Streamable HTTP). PATs are encrypted at rest and never exposed to tools.
 
 Docs: https://developer.planning.center/docs/#/apps/services
 Base: https://api.planningcenteronline.com/services/v2
@@ -19,6 +18,7 @@ from typing import Any, Optional
 import httpx
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
+from auth_layer import current_pat, initialize, metadata, resource_metadata, register, authorize_get, authorize_post, token, revoke, ProtectedMCP
 
 # -----------------------------------------------------------------------------
 # Configuration
@@ -28,19 +28,17 @@ BASE_URL = "https://api.planningcenteronline.com/services/v2"
 DEFAULT_TIMEOUT = 30.0
 MAX_PER_PAGE = 100
 
-# Disable DNS-rebinding protection so the public Render hostname is accepted.
-# Safe here: every tool still requires the caller's own Planning Center credentials.
+# PUBLIC_URL must match the externally reachable HTTPS hostname.
+public_url = os.environ.get('PUBLIC_URL', 'https://localhost')
+from urllib.parse import urlsplit
+hostname = urlsplit(public_url).hostname or 'localhost'
 mcp = FastMCP(
     "Planning Center Services",
-    instructions=(
-        "This server gives full read/write access to the Planning Center Services API "
-        "(service types, plans, items, songs, arrangements, keys, teams, people, etc.). "
-        "Every tool requires the user's Personal Access Token pair: client_id and secret. "
-        "Create a PAT at https://api.planningcenteronline.com/personal_access_tokens "
-        "(or use an OAuth access_token if you prefer — pass it as client_id and leave secret empty)."
-    ),
+    instructions="Use the authenticated user's Planning Center Services permissions. Never request a PAT in tool arguments.",
     transport_security=TransportSecuritySettings(
-        enable_dns_rebinding_protection=False,
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=[hostname, hostname + ':*', 'localhost:*', '127.0.0.1:*'],
+        allowed_origins=[public_url],
     ),
 )
 
@@ -49,23 +47,16 @@ mcp = FastMCP(
 # -----------------------------------------------------------------------------
 
 
-def _auth_header(client_id: str, secret: str = "") -> dict[str, str]:
-    """Build Authorization header. Supports Basic (PAT) or Bearer (OAuth token)."""
-    if secret:
-        # Personal Access Token → HTTP Basic
-        import base64
-
-        token = base64.b64encode(f"{client_id}:{secret}".encode()).decode()
-        return {"Authorization": f"Basic {token}"}
-    # Assume client_id is already a Bearer access_token
-    return {"Authorization": f"Bearer {client_id}"}
+def _auth_header(client_id: str, secret: str) -> dict[str, str]:
+    """Planning Center PAT uses HTTP Basic authentication."""
+    import base64
+    encoded = base64.b64encode(f"{client_id}:{secret}".encode()).decode()
+    return {"Authorization": f"Basic {encoded}"}
 
 
 async def _request(
     method: str,
     path: str,
-    client_id: str,
-    secret: str = "",
     params: Optional[dict[str, Any]] = None,
     json_body: Optional[dict[str, Any]] = None,
     include: Optional[str] = None,
@@ -76,6 +67,10 @@ async def _request(
     filter_: Optional[str] = None,
 ) -> dict[str, Any]:
     """Low-level authenticated request against the Services API."""
+    pat = current_pat.get()
+    if not pat:
+        raise PermissionError("MCP authentication required")
+    client_id, secret = pat
     if not path.startswith("/"):
         path = "/" + path
     url = f"{BASE_URL}{path}"
@@ -153,8 +148,6 @@ def _ok(result: Any) -> str:
 
 @mcp.tool()
 async def pco_services_request(
-    client_id: str,
-    secret: str,
     method: str,
     path: str,
     query: Optional[dict[str, Any]] = None,
@@ -172,8 +165,6 @@ async def pco_services_request(
     arrangements, keys, teams, team_positions, people, plan_people, etc.).
 
     Args:
-        client_id: Personal Access Token application ID (or OAuth access_token).
-        secret: Personal Access Token secret (leave empty if using OAuth Bearer token).
         method: HTTP method – GET, POST, PATCH, DELETE.
         path: Path relative to /services/v2 (e.g. "/service_types", "/songs/123",
               "/service_types/1/plans/2/items").
@@ -190,8 +181,6 @@ async def pco_services_request(
     result = await _request(
         method=method,
         path=path,
-        client_id=client_id,
-        secret=secret,
         params=query,
         json_body=body,
         include=include,
@@ -211,8 +200,6 @@ async def pco_services_request(
 
 @mcp.tool()
 async def list_service_types(
-    client_id: str,
-    secret: str,
     per_page: int = 25,
     offset: int = 0,
     include: Optional[str] = None,
@@ -223,8 +210,6 @@ async def list_service_types(
         await _request(
             "GET",
             "/service_types",
-            client_id,
-            secret,
             per_page=per_page,
             offset=offset,
             include=include,
@@ -235,8 +220,6 @@ async def list_service_types(
 
 @mcp.tool()
 async def get_service_type(
-    client_id: str,
-    secret: str,
     service_type_id: str,
     include: Optional[str] = None,
 ) -> str:
@@ -245,8 +228,6 @@ async def get_service_type(
         await _request(
             "GET",
             f"/service_types/{service_type_id}",
-            client_id,
-            secret,
             include=include,
         )
     )
@@ -254,8 +235,6 @@ async def get_service_type(
 
 @mcp.tool()
 async def create_service_type(
-    client_id: str,
-    secret: str,
     name: str,
     frequency: Optional[str] = None,
     sequence: Optional[int] = None,
@@ -276,13 +255,11 @@ async def create_service_type(
         relationships = {"parent": {"data": {"type": "Folder", "id": parent_id}}}
 
     body = _json_api_create("ServiceType", attrs, relationships)
-    return _ok(await _request("POST", "/service_types", client_id, secret, json_body=body))
+    return _ok(await _request("POST", "/service_types", json_body=body))
 
 
 @mcp.tool()
 async def update_service_type(
-    client_id: str,
-    secret: str,
     service_type_id: str,
     attributes: dict[str, Any],
 ) -> str:
@@ -298,8 +275,6 @@ async def update_service_type(
         await _request(
             "PATCH",
             f"/service_types/{service_type_id}",
-            client_id,
-            secret,
             json_body=body,
         )
     )
@@ -307,13 +282,11 @@ async def update_service_type(
 
 @mcp.tool()
 async def delete_service_type(
-    client_id: str,
-    secret: str,
     service_type_id: str,
 ) -> str:
     """Delete a Service Type."""
     return _ok(
-        await _request("DELETE", f"/service_types/{service_type_id}", client_id, secret)
+        await _request("DELETE", f"/service_types/{service_type_id}")
     )
 
 
@@ -324,8 +297,6 @@ async def delete_service_type(
 
 @mcp.tool()
 async def list_plans(
-    client_id: str,
-    secret: str,
     service_type_id: str,
     per_page: int = 25,
     offset: int = 0,
@@ -338,8 +309,6 @@ async def list_plans(
         await _request(
             "GET",
             f"/service_types/{service_type_id}/plans",
-            client_id,
-            secret,
             per_page=per_page,
             offset=offset,
             include=include,
@@ -351,8 +320,6 @@ async def list_plans(
 
 @mcp.tool()
 async def get_plan(
-    client_id: str,
-    secret: str,
     service_type_id: str,
     plan_id: str,
     include: Optional[str] = None,
@@ -362,8 +329,6 @@ async def get_plan(
         await _request(
             "GET",
             f"/service_types/{service_type_id}/plans/{plan_id}",
-            client_id,
-            secret,
             include=include,
         )
     )
@@ -371,8 +336,6 @@ async def get_plan(
 
 @mcp.tool()
 async def create_plan(
-    client_id: str,
-    secret: str,
     service_type_id: str,
     attributes: dict[str, Any],
 ) -> str:
@@ -386,8 +349,6 @@ async def create_plan(
         await _request(
             "POST",
             f"/service_types/{service_type_id}/plans",
-            client_id,
-            secret,
             json_body=body,
         )
     )
@@ -395,8 +356,6 @@ async def create_plan(
 
 @mcp.tool()
 async def update_plan(
-    client_id: str,
-    secret: str,
     service_type_id: str,
     plan_id: str,
     attributes: dict[str, Any],
@@ -413,8 +372,6 @@ async def update_plan(
         await _request(
             "PATCH",
             f"/service_types/{service_type_id}/plans/{plan_id}",
-            client_id,
-            secret,
             json_body=body,
         )
     )
@@ -422,8 +379,6 @@ async def update_plan(
 
 @mcp.tool()
 async def delete_plan(
-    client_id: str,
-    secret: str,
     service_type_id: str,
     plan_id: str,
 ) -> str:
@@ -432,8 +387,6 @@ async def delete_plan(
         await _request(
             "DELETE",
             f"/service_types/{service_type_id}/plans/{plan_id}",
-            client_id,
-            secret,
         )
     )
 
@@ -445,8 +398,6 @@ async def delete_plan(
 
 @mcp.tool()
 async def list_items(
-    client_id: str,
-    secret: str,
     service_type_id: str,
     plan_id: str,
     per_page: int = 100,
@@ -457,8 +408,6 @@ async def list_items(
         await _request(
             "GET",
             f"/service_types/{service_type_id}/plans/{plan_id}/items",
-            client_id,
-            secret,
             per_page=per_page,
             include=include,
         )
@@ -467,8 +416,6 @@ async def list_items(
 
 @mcp.tool()
 async def get_item(
-    client_id: str,
-    secret: str,
     service_type_id: str,
     plan_id: str,
     item_id: str,
@@ -479,8 +426,6 @@ async def get_item(
         await _request(
             "GET",
             f"/service_types/{service_type_id}/plans/{plan_id}/items/{item_id}",
-            client_id,
-            secret,
             include=include,
         )
     )
@@ -488,8 +433,6 @@ async def get_item(
 
 @mcp.tool()
 async def create_item(
-    client_id: str,
-    secret: str,
     service_type_id: str,
     plan_id: str,
     title: str,
@@ -532,8 +475,6 @@ async def create_item(
         await _request(
             "POST",
             f"/service_types/{service_type_id}/plans/{plan_id}/items",
-            client_id,
-            secret,
             json_body=body,
         )
     )
@@ -541,8 +482,6 @@ async def create_item(
 
 @mcp.tool()
 async def update_item(
-    client_id: str,
-    secret: str,
     service_type_id: str,
     plan_id: str,
     item_id: str,
@@ -560,8 +499,6 @@ async def update_item(
         await _request(
             "PATCH",
             f"/service_types/{service_type_id}/plans/{plan_id}/items/{item_id}",
-            client_id,
-            secret,
             json_body=body,
         )
     )
@@ -569,8 +506,6 @@ async def update_item(
 
 @mcp.tool()
 async def delete_item(
-    client_id: str,
-    secret: str,
     service_type_id: str,
     plan_id: str,
     item_id: str,
@@ -580,8 +515,6 @@ async def delete_item(
         await _request(
             "DELETE",
             f"/service_types/{service_type_id}/plans/{plan_id}/items/{item_id}",
-            client_id,
-            secret,
         )
     )
 
@@ -593,8 +526,6 @@ async def delete_item(
 
 @mcp.tool()
 async def list_songs(
-    client_id: str,
-    secret: str,
     per_page: int = 25,
     offset: int = 0,
     include: Optional[str] = None,
@@ -606,8 +537,6 @@ async def list_songs(
         await _request(
             "GET",
             "/songs",
-            client_id,
-            secret,
             per_page=per_page,
             offset=offset,
             include=include,
@@ -619,8 +548,6 @@ async def list_songs(
 
 @mcp.tool()
 async def get_song(
-    client_id: str,
-    secret: str,
     song_id: str,
     include: Optional[str] = None,
 ) -> str:
@@ -629,8 +556,6 @@ async def get_song(
         await _request(
             "GET",
             f"/songs/{song_id}",
-            client_id,
-            secret,
             include=include,
         )
     )
@@ -638,8 +563,6 @@ async def get_song(
 
 @mcp.tool()
 async def create_song(
-    client_id: str,
-    secret: str,
     title: str,
     author: Optional[str] = None,
     ccli_number: Optional[int] = None,
@@ -662,13 +585,11 @@ async def create_song(
         attrs.update(extra_attributes)
 
     body = _json_api_create("Song", attrs)
-    return _ok(await _request("POST", "/songs", client_id, secret, json_body=body))
+    return _ok(await _request("POST", "/songs", json_body=body))
 
 
 @mcp.tool()
 async def update_song(
-    client_id: str,
-    secret: str,
     song_id: str,
     attributes: dict[str, Any],
 ) -> str:
@@ -681,18 +602,16 @@ async def update_song(
         }
     }
     return _ok(
-        await _request("PATCH", f"/songs/{song_id}", client_id, secret, json_body=body)
+        await _request("PATCH", f"/songs/{song_id}", json_body=body)
     )
 
 
 @mcp.tool()
 async def delete_song(
-    client_id: str,
-    secret: str,
     song_id: str,
 ) -> str:
     """Delete a Song."""
-    return _ok(await _request("DELETE", f"/songs/{song_id}", client_id, secret))
+    return _ok(await _request("DELETE", f"/songs/{song_id}"))
 
 
 # -----------------------------------------------------------------------------
@@ -702,8 +621,6 @@ async def delete_song(
 
 @mcp.tool()
 async def list_arrangements(
-    client_id: str,
-    secret: str,
     song_id: str,
     per_page: int = 25,
     include: Optional[str] = None,
@@ -713,8 +630,6 @@ async def list_arrangements(
         await _request(
             "GET",
             f"/songs/{song_id}/arrangements",
-            client_id,
-            secret,
             per_page=per_page,
             include=include,
         )
@@ -723,8 +638,6 @@ async def list_arrangements(
 
 @mcp.tool()
 async def create_arrangement(
-    client_id: str,
-    secret: str,
     song_id: str,
     name: str,
     bpm: Optional[float] = None,
@@ -754,8 +667,6 @@ async def create_arrangement(
         await _request(
             "POST",
             f"/songs/{song_id}/arrangements",
-            client_id,
-            secret,
             json_body=body,
         )
     )
@@ -763,8 +674,6 @@ async def create_arrangement(
 
 @mcp.tool()
 async def list_keys(
-    client_id: str,
-    secret: str,
     song_id: str,
     arrangement_id: str,
 ) -> str:
@@ -773,16 +682,12 @@ async def list_keys(
         await _request(
             "GET",
             f"/songs/{song_id}/arrangements/{arrangement_id}/keys",
-            client_id,
-            secret,
         )
     )
 
 
 @mcp.tool()
 async def create_key(
-    client_id: str,
-    secret: str,
     song_id: str,
     arrangement_id: str,
     name: str,
@@ -801,8 +706,6 @@ async def create_key(
         await _request(
             "POST",
             f"/songs/{song_id}/arrangements/{arrangement_id}/keys",
-            client_id,
-            secret,
             json_body=body,
         )
     )
@@ -815,8 +718,6 @@ async def create_key(
 
 @mcp.tool()
 async def list_teams(
-    client_id: str,
-    secret: str,
     service_type_id: Optional[str] = None,
     per_page: int = 25,
     include: Optional[str] = None,
@@ -831,8 +732,6 @@ async def list_teams(
         await _request(
             "GET",
             path,
-            client_id,
-            secret,
             per_page=per_page,
             include=include,
         )
@@ -841,8 +740,6 @@ async def list_teams(
 
 @mcp.tool()
 async def create_team(
-    client_id: str,
-    secret: str,
     service_type_id: str,
     name: str,
     schedule_to: Optional[str] = None,
@@ -860,8 +757,6 @@ async def create_team(
         await _request(
             "POST",
             f"/service_types/{service_type_id}/teams",
-            client_id,
-            secret,
             json_body=body,
         )
     )
@@ -888,6 +783,42 @@ async def health(request: Request) -> JSONResponse:
     return JSONResponse({"status": "ok", "service": "pco-services-mcp"})
 
 
+@mcp.custom_route("/.well-known/oauth-authorization-server", methods=["GET"])
+async def oauth_metadata(request: Request):
+    return await metadata(request)
+
+@mcp.custom_route("/.well-known/oauth-protected-resource", methods=["GET"])
+async def oauth_resource_metadata(request: Request):
+    return await resource_metadata(request)
+
+@mcp.custom_route("/.well-known/oauth-protected-resource/mcp", methods=["GET"])
+async def oauth_resource_metadata_mcp(request: Request):
+    return await resource_metadata(request)
+
+@mcp.custom_route("/.well-known/oauth-authorization-server/mcp", methods=["GET"])
+async def oauth_metadata_mcp(request: Request):
+    return await metadata(request)
+
+@mcp.custom_route("/register", methods=["POST"])
+async def oauth_register(request: Request):
+    return await register(request)
+
+@mcp.custom_route("/authorize", methods=["GET"])
+async def oauth_authorize_get(request: Request):
+    return await authorize_get(request)
+
+@mcp.custom_route("/authorize", methods=["POST"])
+async def oauth_authorize_post(request: Request):
+    return await authorize_post(request)
+
+@mcp.custom_route("/token", methods=["POST"])
+async def oauth_token(request: Request):
+    return await token(request)
+
+@mcp.custom_route("/revoke", methods=["POST"])
+async def oauth_revoke(request: Request):
+    return await revoke(request)
+
 # -----------------------------------------------------------------------------
 # Entrypoint (Render / local)
 # -----------------------------------------------------------------------------
@@ -899,6 +830,8 @@ if __name__ == "__main__":
 
     # streamable_http_app() already exposes the MCP endpoint at /mcp
     # and also includes any @mcp.custom_route (e.g. /health)
-    app = mcp.streamable_http_app()
+    import asyncio
+    asyncio.run(initialize())
+    app = ProtectedMCP(mcp.streamable_http_app())
 
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
