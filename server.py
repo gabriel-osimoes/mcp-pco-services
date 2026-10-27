@@ -18,6 +18,7 @@ from typing import Any, Optional
 
 import httpx
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 # -----------------------------------------------------------------------------
 # Configuration
@@ -27,6 +28,8 @@ BASE_URL = "https://api.planningcenteronline.com/services/v2"
 DEFAULT_TIMEOUT = 30.0
 MAX_PER_PAGE = 100
 
+# Disable DNS-rebinding protection so the public Render hostname is accepted.
+# Safe here: every tool still requires the caller's own Planning Center credentials.
 mcp = FastMCP(
     "Planning Center Services",
     instructions=(
@@ -35,6 +38,9 @@ mcp = FastMCP(
         "Every tool requires the user's Personal Access Token pair: client_id and secret. "
         "Create a PAT at https://api.planningcenteronline.com/personal_access_tokens "
         "(or use an OAuth access_token if you prefer — pass it as client_id and leave secret empty)."
+    ),
+    transport_security=TransportSecuritySettings(
+        enable_dns_rebinding_protection=False,
     ),
 )
 
