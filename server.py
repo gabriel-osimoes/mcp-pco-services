@@ -872,47 +872,27 @@ async def health_check() -> str:
     return _ok({"status": "ok", "service": "Planning Center Services MCP"})
 
 
+# Custom HTTP route for Render health checks (not an MCP tool)
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+
+
+@mcp.custom_route("/health", methods=["GET"])
+async def health(request: Request) -> JSONResponse:
+    return JSONResponse({"status": "ok", "service": "pco-services-mcp"})
+
+
 # -----------------------------------------------------------------------------
 # Entrypoint (Render / local)
 # -----------------------------------------------------------------------------
 
 if __name__ == "__main__":
     import uvicorn
-    from starlette.applications import Starlette
-    from starlette.requests import Request
-    from starlette.responses import JSONResponse, PlainTextResponse
-    from starlette.routing import Mount, Route
 
     port = int(os.environ.get("PORT", 10000))
 
-    # Optional simple bearer protection for the whole MCP endpoint
-    MCP_TOKEN = os.environ.get("MCP_API_TOKEN", "").strip()
-
-    async def health(request: Request):
-        return JSONResponse({"status": "ok", "service": "pco-services-mcp"})
-
-    # Build the Streamable HTTP ASGI app from FastMCP
-    mcp_app = mcp.streamable_http_app()
-
-    async def protected_mcp(scope, receive, send):
-        """Optional Bearer token gate before handing off to MCP."""
-        if MCP_TOKEN:
-            headers = {
-                k.decode().lower(): v.decode()
-                for k, v in scope.get("headers", [])
-            }
-            auth = headers.get("authorization", "")
-            if auth != f"Bearer {MCP_TOKEN}":
-                response = PlainTextResponse("Unauthorized", status_code=401)
-                await response(scope, receive, send)
-                return
-        await mcp_app(scope, receive, send)
-
-    app = Starlette(
-        routes=[
-            Route("/health", health, methods=["GET"]),
-            Mount("/mcp", app=protected_mcp),
-        ]
-    )
+    # streamable_http_app() already exposes the MCP endpoint at /mcp
+    # and also includes any @mcp.custom_route (e.g. /health)
+    app = mcp.streamable_http_app()
 
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
